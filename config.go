@@ -10,14 +10,15 @@ import (
 
 // Config lives at %APPDATA%\gemini-bridge\config.json on Windows.
 type Config struct {
-	APIKey        string   `json:"api_key,omitempty"`
-	DefaultModel  string   `json:"default_model,omitempty"`   // "flash" (default), "pro", or an exact model id
-	FlashModel    string   `json:"flash_model,omitempty"`     // pin what "flash" means instead of auto-picking
-	ProModel      string   `json:"pro_model,omitempty"`       // pin what "pro" means
-	ImageModel    string   `json:"image_model,omitempty"`     // pin what "image" means
-	ImageProModel string   `json:"image_pro_model,omitempty"` // pin what "image-pro" means
-	ImageDir      string   `json:"image_dir,omitempty"`       // where generated images go (default Pictures\Gemini)
-	AllowedDirs   []string `json:"allowed_dirs,omitempty"`    // if set, only files inside these folders can be sent
+	APIKey         string   `json:"api_key,omitempty"`
+	DefaultModel   string   `json:"default_model,omitempty"`    // "flash" (default), "pro", or an exact model id
+	FlashModel     string   `json:"flash_model,omitempty"`      // pin what "flash" means instead of auto-picking
+	FlashLiteModel string   `json:"flash_lite_model,omitempty"` // pin what "flash-lite" means
+	ProModel       string   `json:"pro_model,omitempty"`        // pin what "pro" means
+	ImageModel     string   `json:"image_model,omitempty"`      // pin what "image" means
+	ImageProModel  string   `json:"image_pro_model,omitempty"`  // pin what "image-pro" means
+	ImageDir       string   `json:"image_dir,omitempty"`        // where generated images go (default Pictures\Gemini)
+	AllowedDirs    []string `json:"allowed_dirs,omitempty"`     // if set, only files inside these folders can be sent
 }
 
 func configDir() (string, error) {

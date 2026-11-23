@@ -90,6 +90,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force pkg/gemini-bridge | Out-Null
           Copy-Item dist/gemini-bridge.exe, GeminiClaudeHotkeys.ahk, README.md, LICENSE pkg/gemini-bridge/
+          Copy-Item -Recurse skills pkg/gemini-bridge/
           Compress-Archive -Path pkg/gemini-bridge -DestinationPath gemini-bridge-windows-x64.zip
 
       - uses: actions/upload-artifact@v4

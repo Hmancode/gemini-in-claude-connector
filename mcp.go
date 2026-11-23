@@ -20,7 +20,8 @@ import (
 const serverInstructions = `gemini-bridge gives you Google's Gemini models through the user's own Gemini API key.
 Use it when the user asks for Gemini or a second opinion, or when Gemini adds something you lack: watching video and listening to audio (lecture recordings, voice memos, YouTube links), reading very large files without loading them into your own context, generating or editing images, a Google-Search-grounded answer, or an independent cross-check of a fact, calculation or piece of code.
 Gemini sees only what you send, so put the context it needs in the prompt. Files are read on the user's computer and sent to Google, so send only files the user has pointed you to.
-Treat Gemini's answers as another model's work: check them before relying on them, and tell the user which parts came from Gemini.`
+Treat Gemini's answers as another model's work: check them before relying on them, and tell the user which parts came from Gemini.
+If a tool says a feature isn't included on this API key (Pro, images, search), don't retry it: tell the user and carry on with what works.`
 
 const toolsJSON = `[
  {
@@ -34,7 +35,7 @@ const toolsJSON = `[
     "files": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths of files on the user's computer to include."},
     "urls": {"type": "array", "items": {"type": "string"}, "description": "Web pages for Gemini to read, or YouTube links for it to watch."},
     "search": {"type": "boolean", "description": "Ground the answer in Google Search and return the sources used."},
-    "model": {"type": "string", "description": "\"flash\" (default, fast), \"pro\" (strongest reasoning, tighter free-tier limits), or an exact model id from gemini_list_models."},
+    "model": {"type": "string", "description": "\"flash\" (default; falls back to flash-lite automatically if Flash is busy), \"flash-lite\" (lightest, most available on free keys), \"pro\" (strongest; falls back to flash if the key doesn't include Pro), or an exact model id from gemini_list_models (no fallback)."},
     "system": {"type": "string", "description": "Optional system instruction, such as a role or output format."},
     "conversation_id": {"type": "string", "description": "Any short label. Reuse it to continue the same thread; Gemini keeps earlier turns until the Claude app restarts."}
    },
@@ -62,7 +63,7 @@ const toolsJSON = `[
  {
   "name": "gemini_list_models",
   "title": "List Gemini models",
-  "description": "List the Gemini models this API key can use, and which models the shortcuts \"flash\", \"pro\", \"image\" and \"image-pro\" currently point to.",
+  "description": "List the Gemini models this API key can use, and which models the shortcuts \"flash\", \"flash-lite\", \"pro\", \"image\" and \"image-pro\" currently point to.",
   "inputSchema": {"type": "object", "properties": {}},
   "annotations": {"readOnlyHint": true, "openWorldHint": true}
  }

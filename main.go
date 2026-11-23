@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridden at release build time with -ldflags "-X main.version=..."
-var version = "0.1.0-dev"
+var version = "0.1.1-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -102,7 +102,8 @@ func printGemUsage() {
 	fmt.Print(`gem - ask Gemini from any terminal
 
   gem "question"                      ask (fast "flash" model)
-  gem -m pro "question"               use the strongest model
+  gem -m pro "question"               use the strongest model (needs a paid key)
+  gem -m flash-lite "question"        the lightest model, most available on free keys
   gem -f lecture.mp4 "summarize"      attach files (PDF, images, audio, video, text, .docx, .pptx)
   gem -u https://youtu.be/... "notes" read a web page or watch a YouTube video
   gem -s "question"                   ground the answer in Google Search

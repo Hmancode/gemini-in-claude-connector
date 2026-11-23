@@ -36,6 +36,15 @@ type mockGemini struct {
 	errMsg    string // message for forced error
 	block     string // promptFeedback.blockReason
 	lastModel string
+	tried     []string // every model generateContent was called with
+
+	modelErr  map[string]mockErr // per-model forced errors
+	searchErr *mockErr           // forced error whenever googleSearch is requested
+}
+
+type mockErr struct {
+	status int
+	msg    string
 }
 
 func newMock(t *testing.T) *mockGemini {
@@ -104,7 +113,18 @@ func (m *mockGemini) generate(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	m.requests = append(m.requests, body)
 	m.lastModel = model
+	m.tried = append(m.tried, model)
 	status, msg, block := m.status, m.errMsg, m.block
+	if e, ok := m.modelErr[model]; ok {
+		status, msg = e.status, e.msg
+	}
+	if tools, ok := body["tools"].([]any); ok && m.searchErr != nil {
+		for _, tl := range tools {
+			if _, ok := tl.(map[string]any)["googleSearch"]; ok {
+				status, msg = m.searchErr.status, m.searchErr.msg
+			}
+		}
+	}
 	m.mu.Unlock()
 
 	if status != 0 {
@@ -203,6 +223,7 @@ func setupEnv(t *testing.T) string {
 	t.Setenv("GEMINI_API_KEY", "")
 	t.Setenv("GOOGLE_API_KEY", "")
 	pollInterval = 5 * time.Millisecond
+	retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	return dir
 }
 
@@ -375,10 +396,10 @@ func TestErrorsAndRefusals(t *testing.T) {
 	c := newClient("test-key", &Config{})
 	ctx := context.Background()
 
-	m.status, m.errMsg = 429, "Resource exhausted"
+	m.status, m.errMsg = 429, "Resource exhausted. Please retry in 41.5s."
 	_, err := c.Ask(ctx, AskOptions{Prompt: "x"})
-	if !strings.Contains(explain(err), "rate limit or quota") {
-		t.Errorf("429: %s", explain(err))
+	if e := explain(err); !strings.Contains(e, "rate limit") || !strings.Contains(e, "retry in about 42s") {
+		t.Errorf("429: %s", e)
 	}
 
 	m.status, m.errMsg = 404, "models/gemini-3.7-flash is not found"
@@ -679,5 +700,125 @@ func TestNoKeyMessage(t *testing.T) {
 	res = s.callTool(context.Background(), "ask_gemini", json.RawMessage(`{"prompt":"hi"}`))
 	if res["isError"] == true {
 		t.Errorf("after setup: %v", res)
+	}
+}
+
+// Real Google messages seen on a free key, used by the fallback tests.
+const (
+	msgOverloaded  = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+	msgProZero     = "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3.1-pro\nPlease retry in 14h9m53.422391512s."
+	msgImageZero   = "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3.1-flash-image\nPlease retry in 14h8m24.694051182s."
+	msgSearchQuota = "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits."
+)
+
+func TestFallbackWhenFlashIsOverloaded(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	m.modelErr = map[string]mockErr{"gemini-3.7-flash": {503, msgOverloaded}}
+	c := newClient("test-key", &Config{})
+	res, err := c.Ask(context.Background(), AskOptions{Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Model != "gemini-3.1-flash-lite" || res.Text != "Answer from gemini-3.1-flash-lite." {
+		t.Errorf("fallback answered with %s: %q", res.Model, res.Text)
+	}
+	if len(res.Notes) != 1 || res.Notes[0] != "flash was overloaded at Google, so flash-lite answered instead" {
+		t.Errorf("notes: %v", res.Notes)
+	}
+	// the overloaded model was retried (3 attempts) before falling back
+	if n := strings.Count(strings.Join(m.tried, ","), "gemini-3.7-flash"); n != 3 {
+		t.Errorf("flash attempts: %d (%v)", n, m.tried)
+	}
+}
+
+func TestFallbackWhenProIsNotIncluded(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	m.modelErr = map[string]mockErr{"gemini-3.1-pro-preview": {429, msgProZero}}
+	c := newClient("test-key", &Config{})
+	res, err := c.Ask(context.Background(), AskOptions{Prompt: "hi", Model: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Model != "gemini-3.7-flash" || res.Notes[0] != "pro was not included on this API key, so flash answered instead" {
+		t.Errorf("got %s, notes %v", res.Model, res.Notes)
+	}
+	if strings.Count(strings.Join(m.tried, ","), "pro") != 1 {
+		t.Errorf("a limit-0 model should not be retried: %v", m.tried)
+	}
+}
+
+func TestExactModelDoesNotFallBack(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	m.modelErr = map[string]mockErr{"gemini-3.5-flash": {503, msgOverloaded}}
+	c := newClient("test-key", &Config{})
+	_, err := c.Ask(context.Background(), AskOptions{Prompt: "hi", Model: "gemini-3.5-flash"})
+	if err == nil || !strings.Contains(explain(err), "overloaded right now") {
+		t.Fatalf("want overload error, got %v", err)
+	}
+	for _, tried := range m.tried {
+		if tried != "gemini-3.5-flash" {
+			t.Errorf("exact model fell back to %s", tried)
+		}
+	}
+}
+
+func TestEverythingOverloaded(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	m.status, m.errMsg = 503, msgOverloaded
+	c := newClient("test-key", &Config{})
+	_, err := c.Ask(context.Background(), AskOptions{Prompt: "hi", Model: "pro"})
+	e := explain(err)
+	if !strings.Contains(e, "overloaded right now") || !strings.Contains(e, "high demand") {
+		t.Errorf("explain: %s", e)
+	}
+	if got := strings.Join(m.tried, ","); !strings.Contains(got, "pro") || !strings.Contains(got, "gemini-3.7-flash") || !strings.Contains(got, "lite") {
+		t.Errorf("chain not followed: %s", got)
+	}
+}
+
+func TestSearchNotAvailable(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	m.searchErr = &mockErr{429, msgSearchQuota}
+	c := newClient("test-key", &Config{})
+	_, err := c.Ask(context.Background(), AskOptions{Prompt: "weather?", Search: true})
+	e := explain(err)
+	if !strings.Contains(e, "Google Search option isn't available") || !strings.Contains(e, "Claude can search the web itself") {
+		t.Errorf("explain: %s", e)
+	}
+	// without search the same key still answers
+	if _, err := c.Ask(context.Background(), AskOptions{Prompt: "weather?"}); err != nil {
+		t.Errorf("plain ask failed: %v", err)
+	}
+}
+
+func TestImageNotIncluded(t *testing.T) {
+	dir := setupEnv(t)
+	m := newMock(t)
+	m.modelErr = map[string]mockErr{"gemini-3.1-flash-image": {429, msgImageZero}}
+	c := newClient("test-key", &Config{ImageDir: filepath.Join(dir, "imgs")})
+	_, err := c.Image(context.Background(), ImageOptions{Prompt: "a fox"})
+	e := explain(err)
+	if !strings.HasPrefix(e, "Image generation (gemini-3.1-flash-image) isn't included on this API key") || !strings.Contains(e, "Don't retry") {
+		t.Errorf("explain: %s", e)
+	}
+	if strings.Contains(e, "14h") {
+		t.Errorf("a limit-0 message shouldn't suggest waiting: %s", e)
+	}
+}
+
+func TestFlashLiteShortcut(t *testing.T) {
+	setupEnv(t)
+	m := newMock(t)
+	c := newClient("test-key", &Config{})
+	if _, err := c.Ask(context.Background(), AskOptions{Prompt: "hi", Model: "flash-lite"}); err != nil {
+		t.Fatal(err)
+	}
+	if m.lastModel != "gemini-3.1-flash-lite" {
+		t.Errorf("flash-lite resolved to %s", m.lastModel)
 	}
 }

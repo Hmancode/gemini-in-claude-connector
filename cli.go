@@ -124,6 +124,11 @@ func runAsk(args []string) int {
 		return fail(explain(err))
 	}
 	text := formatAnswer(res, false)
+	if a.outFile == "" {
+		for _, n := range res.Notes {
+			fmt.Fprintln(os.Stderr, "("+n+")")
+		}
+	}
 	if a.outFile != "" {
 		if err := os.WriteFile(a.outFile, []byte(text+"\n"), 0o644); err != nil {
 			return fail(err.Error())

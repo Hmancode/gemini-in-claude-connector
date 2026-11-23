@@ -23,6 +23,10 @@ const defaultBaseURL = "https://generativelanguage.googleapis.com"
 
 var errNoKey = errors.New("no Gemini API key is set up yet. Run `gemini-bridge setup` (or set the GEMINI_API_KEY environment variable). Keys are free at https://aistudio.google.com/apikey")
 
+// retryDelays are the waits before retrying a request that hit a network
+// error or a 5xx from Google.
+var retryDelays = []time.Duration{2 * time.Second, 6 * time.Second}
+
 // pollInterval is how often an uploaded video is checked while Google processes it.
 var pollInterval = 3 * time.Second
 
@@ -151,19 +155,77 @@ func (e *RefusalError) Error() string {
 	return "Gemini declined or stopped this request (reason: " + e.Reason + ")"
 }
 
+// SearchUnavailableError means Google refused the Google Search option.
+type SearchUnavailableError struct{ cause *APIError }
+
+func (e *SearchUnavailableError) Error() string {
+	return "Gemini refused the Google Search option: " + e.cause.Error()
+}
+func (e *SearchUnavailableError) Unwrap() error { return e.cause }
+
+// zeroQuota reports a 429 whose limit is 0: the feature isn't included on
+// this key at all (typical for free keys and Pro, images or search).
+func zeroQuota(ae *APIError) bool {
+	return ae.HTTPStatus == 429 && strings.Contains(ae.Message, "limit: 0")
+}
+
+// zeroQuotaForModel reports a limit-0 error that names a model (Pro, images),
+// as opposed to the bare quota error Google returns for the search option.
+func zeroQuotaForModel(ae *APIError) bool {
+	return zeroQuota(ae) && quotaModelRe.MatchString(ae.Message)
+}
+
+// canFallBack reports errors another model might not hit.
+func canFallBack(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.HTTPStatus == 429 || ae.HTTPStatus >= 500)
+}
+
+func whyUnavailable(err error) string {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		switch {
+		case zeroQuota(ae):
+			return "not included on this API key"
+		case ae.HTTPStatus == 429:
+			return "at its rate limit"
+		case ae.HTTPStatus >= 500:
+			return "overloaded at Google"
+		}
+	}
+	return "unavailable"
+}
+
+var (
+	quotaModelRe = regexp.MustCompile(`model: ([A-Za-z0-9._-]+)`)
+	retryInRe    = regexp.MustCompile(`retry in ((?:[0-9.]+[hms])+)`)
+)
+
+func firstSentence(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, ".\n"); i > 0 {
+		return s[:i+1]
+	}
+	return s
+}
+
 // explain turns errors into something a person (or Claude) can act on.
 func explain(err error) string {
 	var ae *APIError
 	var re *RefusalError
+	var se *SearchUnavailableError
 	switch {
 	case errors.Is(err, errNoKey):
 		return err.Error()
 	case errors.Is(err, context.DeadlineExceeded):
-		return "Gemini took too long to answer and the request timed out. Try a smaller request or the \"flash\" model."
+		return "Gemini took too long to answer and the request timed out. Try a smaller request or the \"flash-lite\" model."
 	case errors.Is(err, context.Canceled):
 		return "Cancelled."
 	case errors.As(err, &re):
 		return re.Error() + ". Gemini has its own content rules, separate from Claude's."
+	case errors.As(err, &se):
+		return "Gemini's Google Search option isn't available on this API key right now (free keys get little or no search quota). " +
+			"Ask again without search (Claude can search the web itself), or use the Gemini app. (Google: " + firstSentence(se.cause.Message) + ")"
 	case errors.As(err, &ae):
 		low := strings.ToLower(ae.Message)
 		switch {
@@ -173,10 +235,37 @@ func explain(err error) string {
 			return "Gemini refused access with this key: " + ae.Message
 		case ae.HTTPStatus == 404:
 			return "That Gemini model wasn't found (Google retires models often): " + ae.Message +
-				" Use the model \"flash\" or \"pro\", or run `gemini-bridge models` to see what's available."
+				" Use the model \"flash\" or \"flash-lite\", or run `gemini-bridge models` to see what's available."
+		case zeroQuota(ae):
+			model := "This model"
+			if m := quotaModelRe.FindStringSubmatch(ae.Message); m != nil {
+				model = m[1]
+			}
+			what := model + " isn't"
+			switch l := strings.ToLower(model); {
+			case strings.Contains(l, "image"):
+				what = "Image generation (" + model + ") isn't"
+			case strings.Contains(l, "pro"):
+				what = "Gemini Pro (" + model + ") isn't"
+			}
+			return what + " included on this API key: Google allows it 0 requests, which usually means a free key. " +
+				"It needs billing turned on for the key's project in Google AI Studio. Otherwise use the \"flash\" model, " +
+				"or the Gemini app (Win+G, if you use the hotkeys). Don't retry; this won't change on its own."
 		case ae.HTTPStatus == 429:
-			return "Gemini's rate limit or quota was hit: " + ae.Message +
-				" Free keys have per-minute and per-day caps (tightest on Pro). Wait a bit or use the \"flash\" model."
+			msg := "Gemini's rate limit for this key was reached (free keys have per-minute and per-day caps)."
+			if m := retryInRe.FindStringSubmatch(ae.Message); m != nil {
+				if d, err := time.ParseDuration(m[1]); err == nil {
+					if d > time.Minute {
+						d = d.Round(time.Minute)
+					} else {
+						d = d.Round(time.Second)
+					}
+					return msg + " Google says to retry in about " + d.String() + "."
+				}
+			}
+			return msg + " Wait a minute and try again."
+		case ae.HTTPStatus >= 500:
+			return "Gemini is overloaded right now (Google: " + firstSentence(ae.Message) + "). Try again in a minute, or use the \"flash-lite\" model."
 		}
 		return ae.Error()
 	}
@@ -237,7 +326,6 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body, out 
 			return err
 		}
 	}
-	retryDelays := []time.Duration{2 * time.Second, 6 * time.Second}
 	for attempt := 0; ; attempt++ {
 		var rdr io.Reader
 		if payload != nil {
@@ -353,13 +441,27 @@ type tierRule struct {
 }
 
 var tierRules = map[string]tierRule{
-	"flash":     {"gemini-flash-latest", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-flash(-preview)?(-\d\d-\d{4})?$`)},
-	"pro":       {"gemini-pro-latest", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-pro(-preview)?(-\d\d-\d{4})?$`)},
-	"image":     {"", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-flash-image(-preview)?(-\d\d-\d{4})?$`)},
-	"image-pro": {"", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-pro-image(-preview)?(-\d\d-\d{4})?$`)},
+	"flash":      {"gemini-flash-latest", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-flash(-preview)?(-\d\d-\d{4})?$`)},
+	"flash-lite": {"gemini-flash-lite-latest", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-flash-lite(-preview)?(-\d\d-\d{4})?$`)},
+	"pro":        {"gemini-pro-latest", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-pro(-preview)?(-\d\d-\d{4})?$`)},
+	"image":      {"", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-flash-image(-preview)?(-\d\d-\d{4})?$`)},
+	"image-pro":  {"", regexp.MustCompile(`^gemini-(\d+(?:\.\d+)?)-pro-image(-preview)?(-\d\d-\d{4})?$`)},
 }
 
-var tierOrder = []string{"flash", "pro", "image", "image-pro"}
+var tierOrder = []string{"flash", "flash-lite", "pro", "image", "image-pro"}
+
+// fallbackTiers is what to try next when a model is overloaded or not
+// included on the key. Exact model ids never fall back.
+var fallbackTiers = map[string][]string{
+	"pro":   {"flash", "flash-lite"},
+	"flash": {"flash-lite"},
+}
+
+func tierName(s string) (string, bool) {
+	t := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), " ", "-")
+	_, ok := tierRules[t]
+	return t, ok
+}
 
 func versionKey(s string) int {
 	major, minor, _ := strings.Cut(s, ".")
@@ -416,7 +518,7 @@ func (c *Client) ResolveModel(ctx context.Context, want, fallback string) (strin
 	if _, ok := tierRules[tier]; !ok {
 		return strings.TrimPrefix(name, "models/"), nil
 	}
-	pinned := map[string]string{"flash": c.cfg.FlashModel, "pro": c.cfg.ProModel, "image": c.cfg.ImageModel, "image-pro": c.cfg.ImageProModel}
+	pinned := map[string]string{"flash": c.cfg.FlashModel, "flash-lite": c.cfg.FlashLiteModel, "pro": c.cfg.ProModel, "image": c.cfg.ImageModel, "image-pro": c.cfg.ImageProModel}
 	if p := strings.TrimSpace(pinned[tier]); p != "" {
 		return strings.TrimPrefix(p, "models/"), nil
 	}
@@ -559,9 +661,10 @@ func (c *Client) remember(id string, user, model Content) {
 }
 
 func (c *Client) Ask(ctx context.Context, o AskOptions) (*AskResult, error) {
-	model, err := c.ResolveModel(ctx, o.Model, firstNonEmpty(c.cfg.DefaultModel, "flash"))
-	if err != nil {
-		return nil, err
+	requested := firstNonEmpty(o.Model, c.cfg.DefaultModel, "flash")
+	chain := []string{requested}
+	if t, ok := tierName(requested); ok {
+		chain = append([]string{t}, fallbackTiers[t]...)
 	}
 	parts, notes, err := c.prepareFiles(ctx, o.Files)
 	if err != nil {
@@ -600,9 +703,36 @@ func (c *Client) Ask(ctx context.Context, o AskOptions) (*AskResult, error) {
 		req.Tools = append(req.Tools, map[string]any{"urlContext": map[string]any{}})
 	}
 
-	resp, err := c.Generate(ctx, model, req)
-	if err != nil {
-		return nil, err
+	var resp *GenerateResponse
+	var model string
+	var lastErr error
+	for i, name := range chain {
+		m, err := c.ResolveModel(ctx, name, "")
+		if err != nil {
+			if lastErr == nil {
+				lastErr = err
+			}
+			continue
+		}
+		r, err := c.Generate(ctx, m, req)
+		if err == nil {
+			if i > 0 {
+				notes = append(notes, fmt.Sprintf("%s was %s, so %s answered instead", chain[0], whyUnavailable(lastErr), name))
+			}
+			resp, model = r, m
+			break
+		}
+		lastErr = err
+		if !canFallBack(err) || ctx.Err() != nil {
+			break
+		}
+	}
+	if resp == nil {
+		var ae *APIError
+		if o.Search && errors.As(lastErr, &ae) && ae.HTTPStatus == 429 && !zeroQuotaForModel(ae) {
+			return nil, &SearchUnavailableError{cause: ae}
+		}
+		return nil, lastErr
 	}
 	cand, err := firstCandidate(resp)
 	if err != nil {

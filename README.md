@@ -34,7 +34,29 @@ Claude gets three tools: **ask_gemini**, **gemini_generate_image** and **gemini_
 
 - **ask_gemini** works with text plus local files: PDF, images, audio, video, text and code, .docx and .pptx. It also takes web pages and YouTube links, can base its answer on Google Search, and can hold multi-turn threads (`conversation_id`). Audio, video and big files are uploaded through Google's Files API automatically.
 - **gemini_generate_image** creates or edits images and saves them to `Pictures\Gemini`.
-- **Model shortcuts:** `flash` (the default, fast), `pro` (strongest), `image` and `image-pro`. These are matched to Google's live model list, so they keep working when Google renames models. `gem models` shows where each one points.
+- **Model shortcuts:** `flash` (the default), `flash-lite` (lightest), `pro` (strongest), `image` and `image-pro`. These are matched to Google's live model list, so they keep working when Google renames models. `gem models` shows where each one points.
+- **Automatic fallback:** if Flash is overloaded, the bridge answers with flash-lite. If your key doesn't include Pro, it answers with Flash. The answer says which model was used. Exact model ids never fall back.
+
+### What a free key covers
+
+| Works on a free Gemini API key | Needs billing on the key's project |
+|---|---|
+| Text questions, files (PDF, images, audio, video, text, .docx, .pptx), YouTube, multi-turn threads, using Flash and flash-lite | Pro, image generation, and the Google Search option |
+
+A Google AI Pro or Ultra subscription doesn't raise the limits on API keys. It covers the Gemini app and AI Studio website, which the Win+G hotkey opens. So use Win+G for Pro, images and search. When something isn't included on your key, the bridge says so plainly instead of showing a raw quota error.
+
+## Suggested use: the Claude skill
+
+[`skills/gemini-bridge/SKILL.md`](skills/gemini-bridge/SKILL.md) teaches Claude when the bridge is worth using and how to use it well. It covers:
+- audio and video first, independent cross-checks second, very large files third
+- how to write self-contained prompts
+- a cross-check protocol that doesn't anchor Gemini on Claude's answer
+- how to report fallbacks and limits
+- what not to send without asking
+
+**To add it:**
+- **Claude app:** add the `skills/gemini-bridge` folder as a skill in Claude's skills settings.
+- **Claude Code:** copy the folder to `%USERPROFILE%\.claude\skills\gemini-bridge\`.
 
 **Which Claude chats can use it:**
 - Claude desktop app on the same computer: yes.
@@ -46,7 +68,8 @@ Claude gets three tools: **ask_gemini**, **gemini_generate_image** and **gemini_
 
 ```
 gem "explain global workspace theory in 3 sentences"
-gem -m pro "check this proof for errors" -f proof.pdf
+gem -m flash-lite "quick question"     # lightest model, most available on free keys
+gem -m pro "check this proof for errors" -f proof.pdf   # needs a paid key
 gem -f lecture.mp4 "summarize this lecture with timestamps"
 gem -u https://www.youtube.com/watch?v=... "list the main claims"
 gem -s "what changed in the latest Gemini API release?"
@@ -111,6 +134,7 @@ Publishing a release on GitHub (Releases → Draft a new release) makes CI build
 | `cli.go` | `ask`, `image`, `models` commands and the `gem` shortcut |
 | `setup.go` | Interactive setup: key, install, PATH, Claude config, hotkeys |
 | `GeminiClaudeHotkeys.ahk` | Win+C / Win+G / Win+Shift+G (AutoHotkey v2) |
+| `skills/gemini-bridge/SKILL.md` | Suggested Claude skill for using the bridge |
 
 ## License
 
