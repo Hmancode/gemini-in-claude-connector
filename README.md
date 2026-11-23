@@ -100,7 +100,7 @@ On every push, CI does the following:
 - smoke-tests the MCP handshake and the `gem` command
 - checks `GeminiClaudeHotkeys.ahk` with AutoHotkey v2
 
-Pushing a tag like `v0.1.0` also publishes a release with the zip.
+Publishing a release on GitHub (Releases → Draft a new release) makes CI build the zip and attach it to that release.
 
 | File | What it does |
 |---|---|
