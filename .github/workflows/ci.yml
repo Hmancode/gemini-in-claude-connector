@@ -67,9 +67,16 @@ jobs:
       - name: Check the hotkey script with AutoHotkey v2
         shell: pwsh
         timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          Invoke-WebRequest https://www.autohotkey.com/download/ahk-v2.zip -OutFile ahk.zip
-          Expand-Archive ahk.zip -DestinationPath ahk
+          # autohotkey.com sits behind a bot check, so use the official GitHub releases
+          $tag = gh release list --repo AutoHotkey/AutoHotkey --limit 50 --json tagName --jq '[.[] | select(.tagName | startswith("v2."))][0].tagName'
+          "Using AutoHotkey $tag"
+          gh release download $tag --repo AutoHotkey/AutoHotkey --pattern '*.zip' --dir ahk-download
+          if ($LASTEXITCODE -ne 0) { throw "couldn't download AutoHotkey $tag" }
+          $zip = Get-ChildItem ahk-download -Filter *.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath ahk
           $ahk = Get-ChildItem ahk -Recurse -Filter AutoHotkey64.exe | Select-Object -First 1
           $p = Start-Process -FilePath $ahk.FullName -ArgumentList '/ErrorStdOut', '/validate', 'GeminiClaudeHotkeys.ahk' `
                -NoNewWindow -Wait -PassThru -RedirectStandardError ahk-errors.txt
