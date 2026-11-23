@@ -1,0 +1,6 @@
+*.exe
+*.zip
+dist/
+pkg/
+ahk/
+ahk-errors.txt

@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 -v ./...
+      - name: Race test
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+
+  windows:
+    name: Windows build, smoke test and hotkey script check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build gemini-bridge.exe
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
+          else { $v = "dev-" + "${{ github.sha }}".Substring(0, 7) }
+          go build -trimpath -ldflags "-s -w -X main.version=$v" -o dist/gemini-bridge.exe .
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Smoke-test the exe (version, MCP handshake, gem shim)
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path dist/gemini-bridge.exe
+          & $exe version
+          $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+          $list = '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          $out = ($init, $list) | & $exe serve
+          $out | Out-Host
+          if (-not ($out -match '"ask_gemini"')) { throw "tools/list did not return ask_gemini" }
+          # Same content setup.go writes for the `gem` command
+          [IO.File]::WriteAllText("$PWD\dist\gem.cmd", "@echo off`r`n`"%~dp0gemini-bridge.exe`" gem %*`r`n")
+          $help = & .\dist\gem.cmd help
+          $help | Out-Host
+          if (-not ($help -match 'ask Gemini from any terminal')) { throw "gem.cmd did not reach the exe" }
+
+      - name: Check the hotkey script with AutoHotkey v2
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          Invoke-WebRequest https://www.autohotkey.com/download/ahk-v2.zip -OutFile ahk.zip
+          Expand-Archive ahk.zip -DestinationPath ahk
+          $ahk = Get-ChildItem ahk -Recurse -Filter AutoHotkey64.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $ahk.FullName -ArgumentList '/ErrorStdOut', '/validate', 'GeminiClaudeHotkeys.ahk' `
+               -NoNewWindow -Wait -PassThru -RedirectStandardError ahk-errors.txt
+          if (Test-Path ahk-errors.txt) { Get-Content ahk-errors.txt | Out-Host }
+          if ($p.ExitCode -ne 0) { throw "AutoHotkey found problems in the script (exit code $($p.ExitCode))" }
+          "Hotkey script loads cleanly in AutoHotkey $((Get-Item $ahk.FullName).VersionInfo.ProductVersion)"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg/gemini-bridge | Out-Null
+          Copy-Item dist/gemini-bridge.exe, GeminiClaudeHotkeys.ahk, README.md, LICENSE pkg/gemini-bridge/
+          Compress-Archive -Path pkg/gemini-bridge -DestinationPath gemini-bridge-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gemini-bridge-windows-x64
+          path: gemini-bridge-windows-x64.zip
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gemini-bridge-windows-x64
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" gemini-bridge-windows-x64.zip \
+            --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
